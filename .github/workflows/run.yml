@@ -13,18 +13,30 @@ on:
       max_parallel_clones:
         description: 'Max concurrent git clones'
         required: false
-        default: '24'
+        default: '8'
       seed_minutes:
         description: 'Minutes to seed the torrent before the job ends'
         required: false
-        default: '20'
+        default: '10'
+      compression_level:
+        description: '7z compression level: 0-9 (9=max, takes longest)'
+        required: false
+        default: '9'
+      torrent_file_name_format:
+        description: 'Torrent filename (leave blank for default backup.torrent)'
+        required: false
+        default: ''
+      archive_format:
+        description: 'Archive format: 7z, tar.gz, or zip'
+        required: false
+        default: '7z'
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Resolve target account
+      - name: Resolve target account & format
         id: vars
         run: |
           TARGET="${{ github.event.inputs.github_username }}"
@@ -32,11 +44,27 @@ jobs:
             TARGET="${{ github.repository_owner }}"
           fi
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          
+          FORMAT="${{ github.event.inputs.archive_format }}"
+          FORMAT="${FORMAT:-7z}"
+          case "$FORMAT" in
+            tar.gz) EXT="tar.gz" ;;
+            zip) EXT="zip" ;;
+            *) FORMAT="7z"; EXT="7z" ;;
+          esac
+          echo "format=$FORMAT" >> "$GITHUB_OUTPUT"
+          echo "ext=$EXT" >> "$GITHUB_OUTPUT"
+          
+          TORRENT_NAME="${{ github.event.inputs.torrent_file_name_format }}"
+          if [ -z "$TORRENT_NAME" ]; then
+            TORRENT_NAME="backup_${TARGET}_$(date +%Y%m%d).torrent"
+          fi
+          echo "torrent_name=$TORRENT_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full mktorrent transmission-cli jq
+          sudo apt-get install -y p7zip-full mktorrent transmission-cli jq tar zip
 
       - name: List repos
         env:
@@ -76,34 +104,58 @@ jobs:
         run: |
           find repos -maxdepth 2 -type d -name ".git" -exec rm -rf {} +
 
-      - name: Compress with 7-Zip (medium compression)
+      - name: Compress archive
         run: |
-          7z a -t7z -mx=5 -mmt=on backup.7z repos/
+          COMPRESSION="${{ github.event.inputs.compression_level }}"
+          COMPRESSION="${COMPRESSION:-9}"
+          FORMAT="${{ steps.vars.outputs.format }}"
+          EXT="${{ steps.vars.outputs.ext }}"
+          ARCHIVE_NAME="backup.${EXT}"
+          
+          echo "Creating ${ARCHIVE_NAME} with compression level ${COMPRESSION}..."
+          
+          if [ "$FORMAT" = "tar.gz" ]; then
+            tar -czf "$ARCHIVE_NAME" repos/ --progress
+          elif [ "$FORMAT" = "zip" ]; then
+            zip -r -q "$ARCHIVE_NAME" repos/
+          else
+            # 7z with progress bar (verbose mode shows progress)
+            7z a -t7z -mx="${COMPRESSION}" -mmt=on -bb1 "$ARCHIVE_NAME" repos/
+          fi
+          
+          echo "Archive created: $ARCHIVE_NAME"
+          ls -lh "$ARCHIVE_NAME"
 
       - name: Create .torrent file
         run: |
+          EXT="${{ steps.vars.outputs.ext }}"
+          ARCHIVE_NAME="backup.${EXT}"
+          TORRENT_NAME="${{ steps.vars.outputs.torrent_name }}"
+          
           mktorrent \
             -a udp://tracker.opentrackr.org:1337/announce \
             -a udp://tracker.openbittorrent.com:6969/announce \
             -a udp://open.stealth.si:80/announce \
             -c "Automated backup of ${{ steps.vars.outputs.target }} - $(date -u +%Y-%m-%d)" \
-            -o backup.torrent \
-            backup.7z
+            -o "$TORRENT_NAME" \
+            "$ARCHIVE_NAME"
 
       - name: Show magnet link
         run: |
+          TORRENT_NAME="${{ steps.vars.outputs.torrent_name }}"
           echo "=================================================="
           echo "MAGNET LINK:"
-          transmission-show -m backup.torrent
+          transmission-show -m "$TORRENT_NAME"
           echo "=================================================="
-          transmission-show backup.torrent
+          transmission-show "$TORRENT_NAME"
 
       - name: Seed for a fixed window
         run: |
+          TORRENT_NAME="${{ steps.vars.outputs.torrent_name }}"
           SEED_MIN="${{ github.event.inputs.seed_minutes }}"
           SEED_MIN="${SEED_MIN:-10}"
           echo "Seeding for ${SEED_MIN} minute(s)..."
-          transmission-cli backup.torrent -w "$(pwd)" &
+          transmission-cli "$TORRENT_NAME" -w "$(pwd)" &
           TPID=$!
           sleep "$((SEED_MIN * 60))"
           kill "$TPID" 2>/dev/null || true
@@ -113,6 +165,6 @@ jobs:
         with:
           name: repo-backup-${{ github.run_id }}
           path: |
-            backup.7z
-            backup.torrent
+            backup.*
+            *.torrent
           retention-days: 7
