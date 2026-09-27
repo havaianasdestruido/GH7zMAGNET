@@ -40,7 +40,7 @@ jobs:
 
       - name: List repos
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh repo list "${{ steps.vars.outputs.target }}" \
             --limit 1000 \
@@ -51,7 +51,7 @@ jobs:
 
       - name: Clone all repos in parallel
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p repos
           MAX_PARALLEL="${{ github.event.inputs.max_parallel_clones }}"
