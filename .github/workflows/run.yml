@@ -13,7 +13,7 @@ on:
       max_parallel_clones:
         description: 'Max concurrent git clones'
         required: false
-        default: '8'
+        default: '24'
       seed_minutes:
         description: 'Minutes to seed the torrent before the job ends'
         required: false
@@ -21,7 +21,7 @@ on:
       compression_level:
         description: '7z compression level: 0-9 (9=max, takes longest)'
         required: false
-        default: '9'
+        default: '5'
       torrent_file_name_format:
         description: 'Torrent filename (leave blank for default backup.torrent)'
         required: false
@@ -57,7 +57,7 @@ jobs:
           
           TORRENT_NAME="${{ github.event.inputs.torrent_file_name_format }}"
           if [ -z "$TORRENT_NAME" ]; then
-            TORRENT_NAME="backup_${TARGET}_$(date +%Y%m%d).torrent"
+            TORRENT_NAME="backup_$(date +%d_%m_%Y__%H_%M).torrent"
           fi
           echo "torrent_name=$TORRENT_NAME" >> "$GITHUB_OUTPUT"
 
