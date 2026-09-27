@@ -1,0 +1,118 @@
+name: Backup All Repos → 7z → Torrent
+
+# Manual trigger. Produces a .7z of every repo owned by the target account,
+# wraps it in a .torrent, seeds it for a fixed window, and also uploads
+# both files as workflow artifacts (the reliable fallback — see notes below).
+on:
+  workflow_dispatch:
+    inputs:
+      github_username:
+        description: 'GitHub user/org whose repos to back up (blank = this repo''s owner)'
+        required: false
+        default: ''
+      max_parallel_clones:
+        description: 'Max concurrent git clones'
+        required: false
+        default: '8'
+      seed_minutes:
+        description: 'Minutes to seed the torrent before the job ends'
+        required: false
+        default: '10'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve target account
+        id: vars
+        run: |
+          TARGET="${{ github.event.inputs.github_username }}"
+          if [ -z "$TARGET" ]; then
+            TARGET="${{ github.repository_owner }}"
+          fi
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full mktorrent transmission-cli jq
+
+      - name: List repos
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh repo list "${{ steps.vars.outputs.target }}" \
+            --limit 1000 \
+            --json nameWithOwner \
+            --jq '.[].nameWithOwner' \
+            > repo_list.txt
+          echo "Found $(wc -l < repo_list.txt) repos"
+
+      - name: Clone all repos in parallel
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          mkdir -p repos
+          MAX_PARALLEL="${{ github.event.inputs.max_parallel_clones }}"
+          MAX_PARALLEL="${MAX_PARALLEL:-8}"
+
+          while read -r repo; do
+            name="${repo##*/}"
+            (
+              git clone --depth 1 --quiet \
+                "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" \
+                "repos/${name}" \
+              && echo "cloned: ${repo}" \
+              || echo "FAILED: ${repo}"
+            ) &
+            while [ "$(jobs -r -p | wc -l)" -ge "$MAX_PARALLEL" ]; do
+              wait -n
+            done
+          done < repo_list.txt
+          wait
+
+      - name: Strip .git history (optional, saves a lot of space)
+        run: |
+          find repos -maxdepth 2 -type d -name ".git" -exec rm -rf {} +
+
+      - name: Compress with 7-Zip (max compression)
+        run: |
+          7z a -t7z -mx=9 -mmt=on backup.7z repos/
+
+      - name: Create .torrent file
+        run: |
+          mktorrent \
+            -a udp://tracker.opentrackr.org:1337/announce \
+            -a udp://tracker.openbittorrent.com:6969/announce \
+            -a udp://open.stealth.si:80/announce \
+            -c "Automated backup of ${{ steps.vars.outputs.target }} - $(date -u +%Y-%m-%d)" \
+            -o backup.torrent \
+            backup.7z
+
+      - name: Show magnet link
+        run: |
+          echo "=================================================="
+          echo "MAGNET LINK:"
+          transmission-show -m backup.torrent
+          echo "=================================================="
+          transmission-show backup.torrent
+
+      - name: Seed for a fixed window
+        run: |
+          SEED_MIN="${{ github.event.inputs.seed_minutes }}"
+          SEED_MIN="${SEED_MIN:-10}"
+          echo "Seeding for ${SEED_MIN} minute(s)..."
+          transmission-cli backup.torrent -w "$(pwd)" &
+          TPID=$!
+          sleep "$((SEED_MIN * 60))"
+          kill "$TPID" 2>/dev/null || true
+
+      - name: Upload backup + torrent as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-backup-${{ github.run_id }}
+          path: |
+            backup.7z
+            backup.torrent
+          retention-days: 7
