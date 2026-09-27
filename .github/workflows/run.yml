@@ -13,11 +13,11 @@ on:
       max_parallel_clones:
         description: 'Max concurrent git clones'
         required: false
-        default: '8'
+        default: '24'
       seed_minutes:
         description: 'Minutes to seed the torrent before the job ends'
         required: false
-        default: '10'
+        default: '20'
 
 jobs:
   backup:
@@ -76,9 +76,9 @@ jobs:
         run: |
           find repos -maxdepth 2 -type d -name ".git" -exec rm -rf {} +
 
-      - name: Compress with 7-Zip (max compression)
+      - name: Compress with 7-Zip (medium compression)
         run: |
-          7z a -t7z -mx=9 -mmt=on backup.7z repos/
+          7z a -t7z -mx=5 -mmt=on backup.7z repos/
 
       - name: Create .torrent file
         run: |
