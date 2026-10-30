@@ -1,8 +1,7 @@
-name: Backup All Repos → 7z → Torrent
+name: Backup All Repos → Archive
 
-# Manual trigger. Produces a .7z of every repo owned by the target account,
-# wraps it in a .torrent, seeds it for a fixed window, and also uploads
-# both files as workflow artifacts (the reliable fallback — see notes below).
+# Manual trigger. Uploads the archive as a workflow artifact. Torrent creation
+# and seeding are optional and disabled by default.
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +13,11 @@ on:
         description: 'Max concurrent git clones'
         required: false
         default: '24'
+      enable_torrent:
+        description: 'Create and seed a torrent for the archive'
+        type: boolean
+        required: false
+        default: false
       seed_minutes:
         description: 'Minutes to seed the torrent before the job ends'
         required: false
@@ -23,7 +27,7 @@ on:
         required: false
         default: '5'
       torrent_file_name_format:
-        description: 'Torrent filename (leave blank for default backup.torrent)'
+        description: 'Torrent filename (leave blank for a timestamped name)'
         required: false
         default: ''
       archive_format:
@@ -64,7 +68,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full mktorrent transmission-cli jq tar zip
+          sudo apt-get install -y p7zip-full jq tar zip
+
+      - name: Install torrent dependencies
+        if: ${{ inputs.enable_torrent }}
+        run: sudo apt-get install -y mktorrent transmission-cli
 
       - name: List repos
         env:
@@ -115,7 +123,7 @@ jobs:
           echo "Creating ${ARCHIVE_NAME} with compression level ${COMPRESSION}..."
           
           if [ "$FORMAT" = "tar.gz" ]; then
-            tar -czf "$ARCHIVE_NAME" repos/ --progress
+            tar -czf "$ARCHIVE_NAME" repos/
           elif [ "$FORMAT" = "zip" ]; then
             zip -r -q "$ARCHIVE_NAME" repos/
           else
@@ -126,7 +134,16 @@ jobs:
           echo "Archive created: $ARCHIVE_NAME"
           ls -lh "$ARCHIVE_NAME"
 
+      - name: Upload backup as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-backup-${{ github.run_id }}
+          path: backup.${{ steps.vars.outputs.ext }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Create .torrent file
+        if: ${{ inputs.enable_torrent }}
         run: |
           EXT="${{ steps.vars.outputs.ext }}"
           ARCHIVE_NAME="backup.${EXT}"
@@ -140,7 +157,17 @@ jobs:
             -o "$TORRENT_NAME" \
             "$ARCHIVE_NAME"
 
+      - name: Upload torrent as a workflow artifact
+        if: ${{ inputs.enable_torrent }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-backup-torrent-${{ github.run_id }}
+          path: ${{ steps.vars.outputs.torrent_name }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Show magnet link
+        if: ${{ inputs.enable_torrent }}
         run: |
           TORRENT_NAME="${{ steps.vars.outputs.torrent_name }}"
           echo "=================================================="
@@ -150,6 +177,7 @@ jobs:
           transmission-show "$TORRENT_NAME"
 
       - name: Seed for a fixed window
+        if: ${{ inputs.enable_torrent }}
         run: |
           TORRENT_NAME="${{ steps.vars.outputs.torrent_name }}"
           SEED_MIN="${{ github.event.inputs.seed_minutes }}"
@@ -159,12 +187,3 @@ jobs:
           TPID=$!
           sleep "$((SEED_MIN * 60))"
           kill "$TPID" 2>/dev/null || true
-
-      - name: Upload backup + torrent as workflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-backup-${{ github.run_id }}
-          path: |
-            backup.*
-            *.torrent
-          retention-days: 7
